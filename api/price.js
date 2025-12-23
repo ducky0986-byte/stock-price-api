@@ -1,79 +1,91 @@
 export default async function handler(req, res) {
-  // CORS 헤더 설정
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Content-Type', 'application/json');
 
-  // preflight 요청 처리
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
   try {
-    // Step 1: 인증 토큰 받기
-    const tokenResponse = await fetch(
-      'https://openapivts.koreainvestment.com:29443/oauth2/tokenP',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          grant_type: 'client_credentials',
-          appkey: process.env.KIS_APP_KEY,      // 환경변수 사용
-          appsecret: process.env.KIS_APP_SECRET,
-        }),
-      }
-    );
+    const APP_KEY = process.env.KIS_APP_KEY;
+    const APP_SECRET = process.env.KIS_APP_SECRET;
+    const BASE_URL = 'https://openapi.koreainvestment.com:9443'; // 모의이면 openapivts로 통일
 
-    if (!tokenResponse.ok) {
-      throw new Error('Token request failed');
+    if (!APP_KEY || !APP_SECRET) {
+      throw new Error('KIS_APP_KEY 또는 KIS_APP_SECRET이 설정되지 않았습니다.');
     }
 
-    const tokenData = await tokenResponse.json();
-    const accessToken = tokenData.access_token;
+    // 1) 토큰 요청
+    const tokenRes = await fetch(`${BASE_URL}/oauth2/tokenP`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({
+        grant_type: 'client_credentials',
+        appkey: APP_KEY,
+        appsecret: APP_SECRET,
+      }),
+    });
 
-    // Step 2: 주가 정보 요청
-    const stockCode = req.query.code || '418660'; // 기본값: 418660
-    const priceResponse = await fetch(
-      `https://openapivts.koreainvestment.com:29443/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${stockCode}`,
+    const tokenText = await tokenRes.text();
+    if (!tokenRes.ok) {
+      throw new Error(`Token request failed: ${tokenRes.status} ${tokenText}`);
+    }
+
+    let tokenJson;
+    try {
+      tokenJson = JSON.parse(tokenText);
+    } catch (e) {
+      throw new Error(`Token JSON parse error: ${tokenText}`);
+    }
+
+    const accessToken = tokenJson.access_token;
+    if (!accessToken) {
+      throw new Error(`Token missing access_token: ${tokenText}`);
+    }
+
+    // 2) 시세 요청
+    const code = req.query.code || '418660';
+    const priceRes = await fetch(
+      `${BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${code}`,
       {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          'appkey': process.env.KIS_APP_KEY,
-          'appsecret': process.env.KIS_APP_SECRET,
-          'tr_id': 'FHKST01010100',
+          appkey: APP_KEY,
+          appsecret: APP_SECRET,
+          tr_id: 'FHKST01010100',
           'Content-Type': 'application/json; charset=utf-8',
         },
       }
     );
 
-    if (!priceResponse.ok) {
-      throw new Error('Price request failed');
+    const priceText = await priceRes.text();
+    if (!priceRes.ok) {
+      throw new Error(`Price request failed: ${priceRes.status} ${priceText}`);
     }
 
-    const priceData = await priceResponse.json();
-    const output = priceData.output || {};
+    let priceJson;
+    try {
+      priceJson = JSON.parse(priceText);
+    } catch (e) {
+      throw new Error(`Price JSON parse error: ${priceText}`);
+    }
 
-    // Step 3: 응답 포맷팅
+    const o = priceJson.output || {};
     res.status(200).json({
-      price: parseInt(output.stck_prpr || 0),           // 현재가
-      change: parseFloat(output.prdy_ctrt || 0),        // 등락률
-      high: parseInt(output.stck_hgpr || 0),            // 고가
-      low: parseInt(output.stck_lwpr || 0),             // 저가
-      volume: parseInt(output.acml_vol || 0),           // 거래량
-      timestamp: new Date().toISOString(),
-      raw: output,
+      price: Number(o.stck_prpr || 0),
+      change: Number(o.prdy_ctrt || 0),
+      high: Number(o.stck_hgpr || 0),
+      low: Number(o.stck_lwpr || 0),
+      volume: Number(o.acml_vol || 0),
+      raw: o,
     });
-
-  } catch (error) {
-    console.error('Error:', error);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({
-      error: error.message,
-      price: 36620,  // 폴백 값
+      error: err.message || String(err),
+      price: 36620,
       change: 0,
     });
   }
